@@ -1,5 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
+import json
 
 st.title("✅ Schema Migration Review")
 
@@ -96,7 +97,7 @@ with tab1:
 
             # プロンプトの作成
             prompt = f"""
-            以下のSQLスキーマ変更の安全性を分析してください。
+            以下のSQLスキーマ変更の安全性を分析し、JSON形式で回答してください。
 
             現在のスキーマ:
             {current_schema}
@@ -110,30 +111,140 @@ with tab1:
             過去の障害事例：
             {st.session_state.incidents}
 
-            レビュー結果は以下の3つのセクションに分けて回答してください：
-
-            セクション1: 一般的な観点での分析
-            1. データ損失のリスク
-            2. パフォーマンスへの影響
-            3. ダウンタイムの必要性
-            4. 推奨される実行方法
-
-            セクション2: ルールブックに基づく分析
-            - 各ルールに対する違反の有無
-            - 違反がある場合の具体的な問題点
-            - 改善のための推奨事項
-
-            セクション3: 過去の障害事例に基づく分析
-            - 類似の障害事例の有無
-            - 過去の教訓から得られる注意点
-            - 追加で必要な確認事項
+            以下の形式のJSONで回答してください：
+            {{
+                "general_analysis": {{
+                    "data_loss_risk": {{
+                        "score": 0-100の数値,
+                        "description": "詳細な説明"
+                    }},
+                    "performance_impact": {{
+                        "score": 0-100の数値,
+                        "description": "詳細な説明"
+                    }},
+                    "downtime_required": {{
+                        "score": 0-100の数値,
+                        "description": "詳細な説明"
+                    }}
+                }},
+                "rulebook_analysis": {{
+                    "violations": [
+                        {{
+                            "rule": "違反したルール",
+                            "severity": 0-100の数値,
+                            "description": "詳細な説明",
+                            "recommendation": "改善案"
+                        }}
+                    ],
+                    "no_violations": "ルールに該当するものがない場合は、ここに記載してください"
+                }},
+                "incident_analysis": {{
+                    "similar_incidents": [
+                        {{
+                            "incident": "類似インシデントの概要",
+                            "risk_level": 0-100の数値,
+                            "precautions": "必要な注意事項"
+                        }}
+                    ],
+                    "no_similar_incidents": "過去のインシデントに類似するものがない場合は、ここに記載してください"
+                }},
+                "overall_score": 0-100の数値,
+                "execution_recommendation": "実行推奨/要注意/実行非推奨のいずれか",
+                "summary": "総括コメント"
+            }}
             """
 
             # レビュー結果の生成
             response = model.generate_content(prompt)
 
+            try:
+                # レスポンステキストからJSON部分を抽出
+                response_text = response.text.strip()
+                # コードブロックで囲まれている場合の処理
+                if "```json" in response_text:
+                    json_str = response_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_text:
+                    json_str = response_text.split("```")[1].strip()
+                else:
+                    json_str = response_text
+
+                # JSONとしてパース
+                review_result = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                st.error("レスポンスの解析に失敗しました。もう一度試してください。")
+                st.error(f"エラーの詳細: {str(e)}")
+                st.code(response.text, language="json")
+                st.stop()
+            except Exception as e:
+                st.error(f"予期せぬエラーが発生しました: {str(e)}")
+                st.stop()
+
             st.subheader("🔍 レビュー結果")
-            st.markdown(response.text)
+
+            # 全体評価の表示
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("総合評価スコア", f"{review_result['overall_score']}/100")
+            with col2:
+                recommendation = review_result['execution_recommendation']
+                if recommendation == "実行推奨":
+                    st.success("✅ 実行推奨")
+                elif recommendation == "要注意":
+                    st.warning("⚠️ 要注意")
+                else:
+                    st.error("❌ 実行非推奨")
+
+            st.info(review_result['summary'])
+
+            # 一般分析の表示
+            st.subheader("一般的な観点での分析")
+            general = review_result['general_analysis']
+
+            cols = st.columns(3)
+            with cols[0]:
+                st.metric("データ損失リスク", f"{general['data_loss_risk']['score']}/100")
+                st.write(general['data_loss_risk']['description'])
+
+            with cols[1]:
+                st.metric("パフォーマンスへの影響", f"{general['performance_impact']['score']}/100")
+                st.write(general['performance_impact']['description'])
+
+            with cols[2]:
+                st.metric("ダウンタイムの必要性", f"{general['downtime_required']['score']}/100")
+                st.write(general['downtime_required']['description'])
+
+            # ルールブック分析の表示
+            st.subheader("ルールブックに基づく分析")
+            if review_result['rulebook_analysis'].get('violations') and len(review_result['rulebook_analysis']['violations']) > 0:
+                for violation in review_result['rulebook_analysis']['violations']:
+                    severity = violation['severity']
+                    if severity < 30:
+                        st.success(f"🟢 {violation['rule']}")
+                    elif severity < 70:
+                        st.warning(f"🟡 {violation['rule']}")
+                    else:
+                        st.error(f"🔴 {violation['rule']}")
+
+                    with st.expander("詳細"):
+                        st.write(violation['description'])
+                        st.info(f"💡 推奨対策: {violation['recommendation']}")
+            elif 'no_violations' in review_result['rulebook_analysis']:
+                st.success("✅ " + review_result['rulebook_analysis']['no_violations'])
+
+            # 過去の障害事例との比較
+            st.subheader("過去の障害事例との比較")
+            if review_result['incident_analysis'].get('similar_incidents') and len(review_result['incident_analysis']['similar_incidents']) > 0:
+                for incident in review_result['incident_analysis']['similar_incidents']:
+                    with st.expander(incident['incident']):
+                        st.metric("リスクレベル", f"{incident['risk_level']}/100")
+                        st.write(f"**必要な注意事項:**")
+                        st.write(incident['precautions'])
+            elif 'no_similar_incidents' in review_result['incident_analysis']:
+                st.success("✅ " + review_result['incident_analysis']['no_similar_incidents'])
+
+            # Geminiからの回答全文を表示
+            with st.expander("🤖 Geminiからの回答全文"):
+                st.code(response.text, language="json")
 
         except Exception as e:
             st.error(f"エラーが発生しました: {str(e)}")
